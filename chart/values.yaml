@@ -1,0 +1,205 @@
+# Default values for the sipmediagw chart.
+# Renater upstream reference: https://github.com/Renater/SIPMediaGW
+# deploy/docker-compose.yml + .env are the source of every variable here.
+
+global:
+  imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Renater revision the images are built from. Must match the ref pinned in
+# .github/workflows/build-images.yaml — the tag baked into the images.
+upstream:
+  rev: cc2803668fe808eb048a0937a2dcbc82b20965d6
+
+gateway:
+  image:
+    repository: ghcr.io/gliax/sipmediagw
+    tag: ""   # defaults to .Values.upstream.rev
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  # Gateways need /dev/videoN (v4l2loopback) and /dev/snd (snd-aloop) from the
+  # node, plus the modules loaded (see modulesDaemonset). Land them on the
+  # pool prepared for this workload.
+  nodeSelector:
+    doks.digitalocean.com/node-pool: gateway-nodes
+  tolerations: []
+  affinity: {}
+  # Density: gateways co-locate up to node resources (4 CPU / 4Gi per gateway),
+  # spread across nodes by a soft anti-affinity. Ordinals 0..7 bind host
+  # /dev/video0../dev/video7, so `replicaCount` must stay <= deviceCeiling
+  # (what the modules DaemonSet provisions per node). Enforced at template time.
+  deviceCeiling: 8
+  resources:
+    requests:
+      cpu: "4"
+      memory: 4Gi
+    limits:
+      memory: 6Gi
+  # docker-compose: shm_size: '2gb' (Chromium needs it)
+  shmSize: 2Gi
+  updateStrategy:
+    type: RollingUpdate
+  terminationGracePeriodSeconds: 30
+
+  # Gateway runtime configuration (upstream .env equivalents).
+  config:
+    mainApp: baresip
+    cpuPerGw: "4"
+    timeZone: America/Toronto
+    # BROWSING: nextcloud
+    browsing: nextcloud
+    audioOnly: "false"
+    withAlsa: "true"
+    displays:
+      web: ":99"
+      app: ":100"
+    videoSizeApp: 1280x720
+    videoSizeWebrtc: 640x360
+    videoSizeSlide: 1280x720
+    sipProtocol: tcp
+    # Gateway SIP accounts register as <prefix>.<ordinal>; the prefix comes
+    # from the SIP secret's GW_NAME_PREFIX key (shared with kamailio).
+    sipNamePrefix: ""
+    checkRegister: ""
+    # Registrar/proxy: in-cluster kamailio service (cross-namespace FQDN).
+    # Set to "" to derive from the kamailio service in this release.
+    sipRegistrar: ""
+    sipProxy: ""
+    # TURN (existing coturn for Nextcloud Talk)
+    turnServer: turn.example.org
+    heplifyServer: ""
+    webrtcDomains: >-
+      {
+        "jitsi": { "name": "Jitsi Meet (rendez-vous.renater.fr)", "domain": "rendez-vous.renater.fr" },
+        "bigbluebutton": { "name": "Big Blue Button (bigbluebutton.org)", "domain": "demo.bigbluebutton.org/rooms" },
+        "visio": {"name": "Visio (visio.numerique.gouv.fr)", "domain": "visio.numerique.gouv.fr"},
+        "livekit": {"name": "Livekit (meet.livekit.io)", "domain": "meet.livekit.io/rooms"},
+        "webinaire": { "name": "Webinaire (webinaire.numerique.gouv.fr)", "domain": "webinaire.numerique.gouv.fr" },
+        "teams": {"name": "Teams (teams.live.com)", "domain": "teams.live.com/meet"},
+        "googlemeet": {"name": "Google Meet (meet.google.com)", "domain": "meet.google.com"},
+        "nextcloud": {"name": "Nextcloud Talk (https://turn.example.org/call/)", "domain": "turn.example.org/call"},
+        "bbbesr": { "name": "Big Blue Button (ESR)", "domain": "bbb.numerique-esr.fr" }
+      }
+    confMapper: ""
+    endingTimeout: ""
+    baresipArgs: ""
+    ivrLang: en
+    ivrDigitLength: "5"
+    ivrTts: "true"
+    ivrTimeout: "900"
+    roomRegexp: ""
+    assetsUrl: ""
+    bfcpFloorctrl: c-only
+
+  # Credentials referenced by name, created by scripts/bootstrap-secrets.sh.
+  existingSecrets:
+    # SIP registration password shared with kamailio (key: SIP_SECRET)
+    sip: sipmediagw-sip-secret
+    # TURN credentials for turn.example.org (keys: TURN_USER, TURN_PASS)
+    turn: sipmediagw-turn-secret
+
+# Loads snd-aloop + v4l2loopback on every gateway-eligible node. The modules
+# are host kernel state; the container only needs the option files and a
+# modprobe. Disable if the node image ships them.
+modulesDaemonset:
+  enabled: true
+  image:
+    repository: debian
+    tag: bookworm-slim
+    pullPolicy: IfNotPresent
+  nodeSelector:
+    doks.digitalocean.com/node-pool: gateway-nodes
+
+kamailio:
+  enabled: true
+  image:
+    repository: ghcr.io/gliax/kamailio4sipmediagw
+    tag: ""   # defaults to .Values.upstream.rev
+    pullPolicy: IfNotPresent
+  # Advertised SIP address, injected verbatim into Via/Record-Route headers.
+  # A DNS name is correct: kamailio resolves it at startup (warn-only if DNS
+  # is not ready yet) and the name — not the resolved IP — lands in headers.
+  # Leave "" to fall back to the pod IP (usable in-cluster only).
+  publicAddress: sip.example.org
+  sipDomain: sip.example.org
+  antiflood: "True"
+  tls: "False"
+  debugLevel: "0"
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/do-loadbalancer-name: sipmediagw-sip
+      service.beta.kubernetes.io/do-loadbalancer-protocol: tcp
+    # TCP only: DO load balancers cannot mix TCP+UDP on one Service, and the
+    # trunk flow is sipProtocol: tcp. In-cluster UDP still works pod-to-pod.
+    port: 5060
+  mysql:
+    image:
+      repository: mysql
+      tag: "8.4"
+      pullPolicy: IfNotPresent
+    existingSecret: sipmediagw-mysql-secret   # key: MYSQL_ROOT_PASSWORD
+    database: kamailio
+    user: kamailio
+    storage:
+      size: 5Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+  existingSecrets:
+    # SIP registration credential shared with the gateways.
+    # Keys: SIP_SECRET, GW_NAME_PREFIX
+    cred: sipmediagw-sip-secret
+
+homer:
+  enabled: true
+  heplifyServer:
+    image:
+      repository: sipcapture/heplify-server
+      tag: latest
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        memory: 256Mi
+  webapp:
+    image:
+      repository: sipcapture/webapp
+      tag: latest
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+  postgres:
+    image:
+      repository: timescale/timescaledb
+      tag: latest-pg15
+      pullPolicy: IfNotPresent
+    existingSecret: sipmediagw-postgres-secret   # keys: POSTGRES_USER, POSTGRES_PASSWORD
+    storage:
+      size: 10Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi

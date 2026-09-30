@@ -1,0 +1,95 @@
+{{- if .Values.kamailio.enabled }}
+{{- $fullname := include "sipmediagw.fullname" . -}}
+{{- $mysql := .Values.kamailio.mysql -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-mysql
+  labels:
+    {{- include "sipmediagw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mysql
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "sipmediagw.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $fullname }}-mysql
+  labels:
+    {{- include "sipmediagw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mysql
+spec:
+  serviceName: {{ $fullname }}-mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "sipmediagw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mysql
+  template:
+    metadata:
+      labels:
+        {{- include "sipmediagw.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mysql
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mysql
+          image: "{{ $mysql.image.repository }}:{{ $mysql.image.tag }}"
+          imagePullPolicy: {{ $mysql.image.pullPolicy }}
+          env:
+            # Upstream parity: only the root password comes from the operator;
+            # kamailioRun.py creates the "kamailio" user and schema itself
+            # (kamctlrc baked into the image holds DBRWPW).
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $mysql.existingSecret }}
+                  key: MYSQL_ROOT_PASSWORD
+          ports:
+            - name: mysql
+              containerPort: 3306
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -p"$MYSQL_ROOT_PASSWORD"
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -p"$MYSQL_ROOT_PASSWORD"
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml $mysql.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if $mysql.storage.storageClass }}
+        storageClassName: {{ $mysql.storage.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $mysql.storage.size }}
+{{- end }}

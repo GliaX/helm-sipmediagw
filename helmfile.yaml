@@ -1,0 +1,17 @@
+# Deploy with:  helmfile apply
+# Diff with:    helmfile diff
+# Tear down:    helmfile destroy
+#
+# Site-specific values (domains, node pools, ...) live OUTSIDE this repo.
+# Layer them on top of the chart defaults with:
+#   helmfile --state-values-file ../your-values.yaml apply
+
+releases:
+  - name: sipmediagw
+    namespace: sipmediagw
+    chart: ./chart
+    createNamespace: true
+    # Pass state values through to the release (helmfile does not do this
+    # on its own: --state-values-file only feeds {{ .Values }} here).
+    values:
+      - {{ toYaml .Values | nindent 8 }}

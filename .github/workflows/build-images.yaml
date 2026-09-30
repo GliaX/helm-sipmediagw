@@ -1,0 +1,53 @@
+name: build-images
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-images.yaml"
+
+env:
+  UPSTREAM_REPO: https://github.com/Renater/SIPMediaGW
+  UPSTREAM_REV: cc2803668fe808eb048a0937a2dcbc82b20965d6
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout upstream at pinned rev
+        uses: actions/checkout@v4
+        with:
+          repository: Renater/SIPMediaGW
+          ref: ${{ env.UPSTREAM_REV }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push gateway image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/gliax/sipmediagw:${{ env.UPSTREAM_REV }}
+            ghcr.io/gliax/sipmediagw:latest
+
+      - name: Build and push kamailio image
+        uses: docker/build-push-action@v6
+        with:
+          context: deploy/kamailio
+          push: true
+          tags: |
+            ghcr.io/gliax/kamailio4sipmediagw:${{ env.UPSTREAM_REV }}
+            ghcr.io/gliax/kamailio4sipmediagw:latest

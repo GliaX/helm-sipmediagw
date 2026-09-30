@@ -1,0 +1,59 @@
+{{- if .Values.modulesDaemonset.enabled }}
+{{- $fullname := include "sipmediagw.fullname" . -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $fullname }}-modules
+  labels:
+    {{- include "sipmediagw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-modules
+spec:
+  selector:
+    matchLabels:
+      {{- include "sipmediagw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: node-modules
+  template:
+    metadata:
+      labels:
+        {{- include "sipmediagw.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: node-modules
+    spec:
+      nodeSelector:
+        {{- toYaml .Values.modulesDaemonset.nodeSelector | nindent 8 }}
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: modules
+          image: "{{ .Values.modulesDaemonset.image.repository }}:{{ .Values.modulesDaemonset.image.tag }}"
+          imagePullPolicy: {{ .Values.modulesDaemonset.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -eu
+              printf 'options snd-aloop enable=1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1 index=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n' > /etc/modprobe.d/alsa-loopback.conf
+              printf 'options v4l2loopback devices=8 exclusive_caps=1,1,1,1,1,1,1,1\n' > /etc/modprobe.d/v4l2loopback.conf
+              modprobe snd-aloop
+              modprobe v4l2loopback
+              # ceiling device: catches stale module options (e.g. a node that
+              # loaded devices=4 earlier would pass video0 but never expose 1..7)
+              test -e /dev/video7
+              echo "modules loaded, devices present; staying resident"
+              sleep infinity
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - test -e /dev/video7 && lsmod | grep -q snd-aloop && lsmod | grep -q v4l2loopback
+            initialDelaySeconds: 15
+            periodSeconds: 60
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+{{- end }}

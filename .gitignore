@@ -1,0 +1,4 @@
+secrets.env
+*.secret.yaml
+kamailio-backup.sql
+.idea/

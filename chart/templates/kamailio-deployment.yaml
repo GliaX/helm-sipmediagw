@@ -1,0 +1,87 @@
+{{- if .Values.kamailio.enabled }}
+{{- $fullname := include "sipmediagw.fullname" . -}}
+{{- $kam := .Values.kamailio -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-kamailio
+  labels:
+    {{- include "sipmediagw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kamailio
+spec:
+  replicas: {{ $kam.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "sipmediagw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: kamailio
+  template:
+    metadata:
+      labels:
+        {{- include "sipmediagw.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: kamailio
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: kamailio
+          image: "{{ $kam.image.repository }}:{{ $kam.image.tag | default .Values.upstream.rev }}"
+          imagePullPolicy: {{ $kam.image.pullPolicy }}
+          env:
+            {{- with $kam.publicAddress }}
+            - name: PUBLIC_IP
+              value: {{ . | quote }}
+            {{- end }}
+            - name: LOCAL_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: SIP_DOMAIN
+              value: {{ $kam.sipDomain | quote }}
+            - name: ANTIFLOOD
+              value: {{ $kam.antiflood | quote }}
+            - name: TLS
+              value: {{ $kam.tls | quote }}
+            - name: DEBUG_LEVEL
+              value: {{ $kam.debugLevel | quote }}
+            {{- if .Values.homer.enabled }}
+            - name: HEPLIFY_SRV
+              value: {{ printf "%s-heplify.%s.svc.cluster.local" $fullname .Release.Namespace | quote }}
+            {{- end }}
+            - name: MYSQL_HOST
+              value: {{ printf "%s-mysql" $fullname | quote }}
+            - name: SIP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $kam.existingSecrets.cred }}
+                  key: SIP_SECRET
+            - name: GW_NAME_PREFIX
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $kam.existingSecrets.cred }}
+                  key: GW_NAME_PREFIX
+          envFrom:
+            - secretRef:
+                name: {{ $kam.mysql.existingSecret }}
+          ports:
+            - name: sip-udp
+              containerPort: 5060
+              protocol: UDP
+            - name: sip-tcp
+              containerPort: 5060
+          readinessProbe:
+            tcpSocket:
+              port: sip-tcp
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: sip-tcp
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml $kam.resources | nindent 12 }}
+{{- end }}

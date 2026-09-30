@@ -1,0 +1,188 @@
+{{- $fullname := include "sipmediagw.fullname" . -}}
+{{- $gw := .Values.gateway -}}
+{{- if gt (int $gw.replicaCount) (int $gw.deviceCeiling) }}
+{{- fail (printf "gateway.replicaCount (%d) exceeds gateway.deviceCeiling (%d): nodes only have /dev/video0../dev/video%d" (int $gw.replicaCount) (int $gw.deviceCeiling) (int (sub $gw.deviceCeiling 1))) }}
+{{- end }}
+{{- $gwConfig := $gw.config -}}
+{{- $kamHost := printf "%s-kamailio.%s.svc.cluster.local" $fullname .Release.Namespace -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-gateway
+  labels:
+    {{- include "sipmediagw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    {{- include "sipmediagw.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $fullname }}-gateway
+  labels:
+    {{- include "sipmediagw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  serviceName: {{ $fullname }}-gateway
+  replicas: {{ $gw.replicaCount }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    {{- toYaml $gw.updateStrategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "sipmediagw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        {{- include "sipmediagw.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+      annotations:
+        # Restart pods when gateway config changes: envFrom is only read at
+        # container start, so a ConfigMap update alone would be ignored.
+        checksum/config: {{ include (print $.Template.BasePath "/gateway-configmap.yaml") . | sha256sum | quote }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ $gw.terminationGracePeriodSeconds }}
+      nodeSelector:
+        {{- toYaml $gw.nodeSelector | nindent 8 }}
+      {{- with $gw.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values:
+                        - {{ include "sipmediagw.name" . | quote }}
+                    - key: app.kubernetes.io/instance
+                      operator: In
+                      values:
+                        - {{ .Release.Name | quote }}
+                    - key: app.kubernetes.io/component
+                      operator: In
+                      values:
+                        - gateway
+                topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: wait-for-device
+          image: "{{ $gw.image.repository }}:{{ $gw.image.tag | default .Values.upstream.rev }}"
+          imagePullPolicy: {{ $gw.image.pullPolicy }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              DEV="/dev-host/video${GW_ID}"
+              for i in $(seq 1 150); do
+                [ -e "$DEV" ] && echo "$DEV present" && exit 0
+                sleep 2
+              done
+              echo "timeout waiting for $DEV — is the modules DaemonSet up on this node?" >&2
+              exit 1
+          env:
+            - name: GW_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+          volumeMounts:
+            - name: dev-video
+              mountPath: /dev-host
+      containers:
+        - name: gateway
+          image: "{{ $gw.image.repository }}:{{ $gw.image.tag | default .Values.upstream.rev }}"
+          imagePullPolicy: {{ $gw.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          env:
+            - name: GW_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+            {{- if $gwConfig.sipRegistrar }}
+            - name: SIP_REGISTRAR
+              value: {{ $gwConfig.sipRegistrar | quote }}
+            {{- else }}
+            - name: SIP_REGISTRAR
+              value: {{ $kamHost | quote }}
+            {{- end }}
+            {{- if $gwConfig.sipProxy }}
+            - name: SIP_PROXY
+              value: {{ $gwConfig.sipProxy | quote }}
+            {{- else }}
+            - name: SIP_PROXY
+              value: {{ $kamHost | quote }}
+            {{- end }}
+            {{- if $gwConfig.heplifyServer }}
+            - name: HEPLIFY_SRV
+              value: {{ $gwConfig.heplifyServer | quote }}
+            {{- else if .Values.homer.enabled }}
+            - name: HEPLIFY_SRV
+              value: {{ printf "%s-heplify.%s.svc.cluster.local" $fullname .Release.Namespace | quote }}
+            {{- end }}
+            - name: TURN_SRV
+              value: {{ $gwConfig.turnServer | quote }}
+            - name: SIP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $gw.existingSecrets.sip }}
+                  key: SIP_SECRET
+            - name: GW_NAME_PREFIX
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $gw.existingSecrets.sip }}
+                  key: GW_NAME_PREFIX
+            - name: TURN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $gw.existingSecrets.turn }}
+                  key: TURN_USER
+            - name: TURN_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $gw.existingSecrets.turn }}
+                  key: TURN_PASS
+          envFrom:
+            - configMapRef:
+                name: {{ $fullname }}-gateway
+          volumeMounts:
+            - name: dev-video
+              mountPath: /dev/video0
+              subPathExpr: video$(GW_ID)
+            - name: dev-snd
+              mountPath: /dev/snd
+            - name: logs
+              mountPath: /var/logs
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - pgrep -f "${MAIN_APP:-baresip}" > /dev/null
+            periodSeconds: 30
+            failureThreshold: 6
+          resources:
+            {{- toYaml $gw.resources | nindent 12 }}
+      volumes:
+        - name: dev-video
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: dev-snd
+          hostPath:
+            path: /dev/snd
+            type: Directory
+        - name: logs
+          emptyDir: {}

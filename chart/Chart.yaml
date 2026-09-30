@@ -1,0 +1,11 @@
+apiVersion: v2
+name: sipmediagw
+description: SIPMediaGW on Kubernetes — Renater SIP-to-webconference media gateway
+type: application
+version: 0.1.0
+appVersion: "cc280366"
+keywords:
+  - sip
+  - webrtc
+  - media-gateway
+home: https://github.com/Renater/SIPMediaGW

@@ -1,0 +1,23 @@
+{{- if .Values.kamailio.enabled }}
+{{- $fullname := include "sipmediagw.fullname" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-kamailio
+  labels:
+    {{- include "sipmediagw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kamailio
+  annotations:
+    {{- toYaml .Values.kamailio.service.annotations | nindent 4 }}
+spec:
+  type: {{ .Values.kamailio.service.type }}
+  externalTrafficPolicy: Local
+  selector:
+    {{- include "sipmediagw.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: kamailio
+  ports:
+    - name: sip-tcp
+      protocol: TCP
+      port: {{ .Values.kamailio.service.port }}
+      targetPort: 5060
+{{- end }}

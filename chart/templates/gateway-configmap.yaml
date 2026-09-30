@@ -1,0 +1,49 @@
+{{- $fullname := include "sipmediagw.fullname" . -}}
+{{- $gwConfig := .Values.gateway.config -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-gateway
+  labels:
+    {{- include "sipmediagw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+data:
+  WEBRTC_DOMAINS: |
+{{ $gwConfig.webrtcDomains | indent 4 }}
+  MAIN_APP: {{ $gwConfig.mainApp | quote }}
+  CPU_PER_GW: {{ $gwConfig.cpuPerGw | quote }}
+  TZ: {{ $gwConfig.timeZone | quote }}
+  BROWSING: {{ $gwConfig.browsing | quote }}
+  AUDIO_ONLY: {{ $gwConfig.audioOnly | quote }}
+  WITH_ALSA: {{ $gwConfig.withAlsa | quote }}
+  DISPLAY: {{ $gwConfig.displays.web | quote }}
+  DISPLAY_WEB: {{ $gwConfig.displays.web | quote }}
+  DISPLAY_APP: {{ $gwConfig.displays.app | quote }}
+  VID_SIZE_APP: {{ $gwConfig.videoSizeApp | quote }}
+  VID_SIZE_WEBRTC: {{ $gwConfig.videoSizeWebrtc | quote }}
+  VID_SIZE_SLIDE: {{ $gwConfig.videoSizeSlide | quote }}
+  SIP_PROTOCOL: {{ $gwConfig.sipProtocol | quote }}
+  {{- with $gwConfig.sipNamePrefix }}
+  SIP_NAME_PREFIX: {{ . | quote }}
+  {{- end }}
+  {{- with $gwConfig.checkRegister }}
+  CHECK_REGISTER: {{ . | quote }}
+  {{- end }}
+  {{- with $gwConfig.confMapper }}
+  CONFMAPPER: {{ . | quote }}
+  {{- end }}
+  {{- with $gwConfig.endingTimeout }}
+  ENDING_TIMEOUT: {{ . | quote }}
+  {{- end }}
+  BARESIP_ARGS: {{ $gwConfig.baresipArgs | quote }}
+  IVR_LANG: {{ $gwConfig.ivrLang | quote }}
+  IVR_DIGIT_LENGTH: {{ $gwConfig.ivrDigitLength | quote }}
+  IVR_TTS: {{ $gwConfig.ivrTts | quote }}
+  IVR_TIMEOUT: {{ $gwConfig.ivrTimeout | quote }}
+  {{- with $gwConfig.roomRegexp }}
+  ROOM_REGEXP: {{ . | quote }}
+  {{- end }}
+  {{- with $gwConfig.assetsUrl }}
+  ASSETS_URL: {{ . | quote }}
+  {{- end }}
+  BFCP_FLOORCTRL: {{ $gwConfig.bfcpFloorctrl | quote }}
