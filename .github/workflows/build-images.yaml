@@ -45,10 +45,51 @@ jobs:
             ghcr.io/gliax/sipmediagw:${{ env.UPSTREAM_REV }}
             ghcr.io/gliax/sipmediagw:latest
 
+      - name: Write kamailio Dockerfile and patch config for kamailio 6
+        run: |
+          # kamailio 6.0 removed the dlg_flag modparam (dialogs are created
+          # with dlg_manage(), which upstream's cfg already calls at the only
+          # place that matters). With this one line dropped the whole upstream
+          # config passes `kamailio -c` on 6.0.8.
+          sed -i '/modparam("dialog", "dlg_flag", 4)/d' deploy/kamailio/config/kamailio.cfg
+          cat > deploy/kamailio/Dockerfile.glia <<'EOF'
+          # Upstream builds this image FROM kamailio/kamailio:5.6.3-bullseye,
+          # which can no longer be built: bullseye went EOL 2026-08-31 and the
+          # security pool lost the packages its index still advertises
+          # (python3.9 404s mid-install). Same scripts/config, rebuilt on the
+          # official kamailio 6.0.8 image (Debian trixie, python 3.13).
+          FROM ghcr.io/kamailio/kamailio:6.0.8-trixie
+
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+              python3-pip cron \
+              && apt-get autoremove -y \
+              && apt-get autoclean -y
+
+          # trixie is PEP-668 externally-managed; upstream's plain pip3 install
+          # would refuse. No python3-dev needed: all wheels, no builds.
+          RUN pip3 install --break-system-packages \
+              requests httplib2 mysql-connector-python
+
+          WORKDIR /etc/kamailio/
+
+          RUN mkdir /usr/local/etc/kamailio
+
+          EXPOSE 5060
+
+          COPY config/ /etc/kamailio/
+
+          COPY kamailioRun.py /usr/local/bin/kamailioRun
+
+          COPY kamailioGetLogs.py /usr/local/bin/kamailioGetLogs
+          RUN (echo '* * * * * /usr/local/bin/kamailioGetLogs > /proc/1/fd/1 2>/proc/1/fd/2' > /etc/cron.d/logger)
+          RUN crontab /etc/cron.d/logger
+          EOF
+
       - name: Build and push kamailio image
         uses: docker/build-push-action@v6
         with:
           context: deploy/kamailio
+          file: deploy/kamailio/Dockerfile.glia
           push: true
           tags: |
             ghcr.io/gliax/kamailio4sipmediagw:${{ env.UPSTREAM_REV }}

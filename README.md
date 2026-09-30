@@ -14,7 +14,7 @@ GitHub Actions secrets and Kubernetes Secrets referenced by the chart via
 | Component        | Choice                                                                  |
 | ---------------- | ----------------------------------------------------------------------- |
 | Gateway images   | Built **as-is** from upstream rev `cc280366` (no overlay). Workflow: `.github/workflows/build-images.yaml` → `ghcr.io/gliax/sipmediagw`, `ghcr.io/gliax/kamailio4sipmediagw` |
-| Kamailio + MySQL | In-cluster; SIP registration + gateway dispatch (upstream logic, unmodified) |
+| Kamailio + MySQL | In-cluster; SIP registration + gateway dispatch. Upstream config/scripts on the official kamailio **6.0.8** image (Debian trixie) — upstream's own base (5.6.3-bullseye) is unbuildable since bullseye EOL; sole config delta: `dlg_flag` modparam dropped (removed in kamailio 6) |
 | Public SIP entry | Dedicated LoadBalancer (TCP 5060) — `sip.example.org` points at its IP |
 | Gateways         | Static StatefulSet replicas (no HTTPLauncher / proxyAPI / pairing)       |
 | Media (RTP)      | Outbound via existing coturn `turn.example.org:3478` (Nextcloud Talk TURN) — no inbound RTP ports needed |
