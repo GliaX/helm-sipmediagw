@@ -4,8 +4,9 @@ Helmfile-based deployment of [Renater/SIPMediaGW](https://github.com/Renater/SIP
 for a Kubernetes cluster: SIP room devices dial in over PSTN (Twilio) and bridge
 into Nextcloud Talk rooms.
 
-This repo holds only non-secret configuration and the image-build workflow.
-All credentials live in Kubernetes Secrets referenced by the chart via
+This repo holds only non-secret configuration plus two workflows: one builds
+the images, one deploys the stack to the cluster. All credentials live in
+GitHub Actions secrets and Kubernetes Secrets referenced by the chart via
 `existingSecret` — nothing sensitive is committed here.
 
 ## Architecture at a glance
@@ -25,7 +26,8 @@ All credentials live in Kubernetes Secrets referenced by the chart via
 
 ```
 .
-├── helmfile.yaml                     # Release declaration (local chart)
+├── helmfile.yaml.gotmpl              # Release declaration (local chart); .gotmpl
+│                                     # because helmfile v1 evaluates templates only there
 ├── chart/
 │   ├── Chart.yaml
 │   ├── values.yaml
@@ -39,7 +41,9 @@ All credentials live in Kubernetes Secrets referenced by the chart via
 │       └── homer.yaml                # timescale + heplify-server + webapp
 ├── scripts/
 │   └── bootstrap-secrets.sh          # Creates the 4 Secrets from env vars
-└── .github/workflows/build-images.yaml
+├── .github/workflows/
+│   ├── build-images.yaml             # CI: builds + pushes both images to GHCR
+│   └── deploy.yaml                   # CD: bootstrap Secrets + helmfile apply
 ```
 
 ## Prerequisites
@@ -53,28 +57,48 @@ All credentials live in Kubernetes Secrets referenced by the chart via
 - GHCR packages `ghcr.io/gliax/sipmediagw` and `ghcr.io/gliax/kamailio4sipmediagw`
   (public, or set `global.imagePullSecrets` if kept private)
 
-## Image builds
+## CI / CD
 
-`.github/workflows/build-images.yaml` checks out Renater/SIPMediaGW at the
-pinned rev and builds both images with **zero patches**, then pushes them to
-GHCR under `gliax/`. To move to a newer upstream rev:
+Two workflows, both triggered on push (they only run when their own files
+change for CI; CD also chains off CI):
 
-1. Update `UPSTREAM_REV` in the workflow and `upstream.rev` + `appVersion` in
-   `chart/values.yaml` / `Chart.yaml` (keep the three in sync — the tag equals the rev).
-2. Run the workflow (`workflow_dispatch`).
-3. `helmfile diff`, review, `helmfile apply`.
+- **`build-images.yaml`** (CI) — checks out Renater/SIPMediaGW at the pinned
+  rev, builds both images with **zero patches**, pushes them to GHCR under
+  `gliax/`. To move to a newer upstream rev:
+  1. Update `UPSTREAM_REV` in the workflow and `upstream.rev` + `appVersion`
+     in `chart/values.yaml` / `Chart.yaml` (keep the three in sync — the tag
+     equals the rev).
+  2. Push; the build runs, then deploy fires automatically.
+
+- **`deploy.yaml`** (CD) — after every successful build, and on demand via
+  its "Run workflow" button: writes the site values overlay from the
+  `GLIA_VALUES_YAML` secret, fetches a short-lived DOKS kubeconfig with
+  `doctl`, recreates the 4 k8s Secrets via `bootstrap-secrets.sh`, and runs
+  `helmfile apply`. Site values therefore never live in any repo — update
+  them from the workstation with
+  `gh secret set GLIA_VALUES_YAML < values-glia.yaml`.
+
+### Required GitHub secrets
+
+| Secret | Contents |
+| ------ | -------- |
+| `GLIA_VALUES_YAML` | full text of the private site values overlay |
+| `SIP_SECRET` | shared gateway/kamailio SIP registration password |
+| `TURN_USER` / `TURN_PASS` | coturn credentials at `turn.example.org` |
+| `MYSQL_ROOT_PASSWORD` | kamailio DB root password |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` | homer DB credentials |
+| `DIGITALOCEAN_ACCESS_TOKEN` | DO API token (kubeconfig exchange only) |
+| `DOKS_CLUSTER_NAME` | DOKS cluster name |
 
 ## First-time deploy
 
 ```sh
-# 1. Secrets (values never committed; secrets.env is gitignored)
-set -a; . ../secrets.env; set +a
-./scripts/bootstrap-secrets.sh
+# 1. Push the repo: build-images runs, then deploy fires automatically
+#    (DIGITALOCEAN_ACCESS_TOKEN must be set for the deploy job to reach the
+#    cluster; the six credential secrets feed bootstrap-secrets.sh)
 
-# 2. Images (once): run build-images.yaml on GitHub
-
-# 3. Deploy
-helmfile apply
+# 2. One-time DNS: after the first apply, create the A record for
+#    sip.example.org (see below), then re-run the deploy workflow
 ```
 
 ### Public SIP entry (one-time DNS setup)
@@ -84,9 +108,10 @@ headers, so an LB IP change only ever touches the A record.
 
 - Get the LB external IP: `kubectl -n sipmediagw get svc sipmediagw-kamailio`
 - Create DNS A record: `sip.example.org` → that IP.
-- Set `kamailio.publicAddress` to that DNS name in a site values file layered
-  on top of the chart defaults (see the header of `helmfile.yaml`):
-  `helmfile --state-values-file ../your-values.yaml apply`.
+- Set `kamailio.publicAddress` to that DNS name in the site values overlay
+  (the `GLIA_VALUES_YAML` Actions secret — update it from the workstation:
+  `gh secret set GLIA_VALUES_YAML < values-glia.yaml`), then re-run the
+  deploy workflow.
 - Point Twilio at `sip:<room-token>@sip.example.org`.
 
 The A record must resolve before the kamailio pod starts; if it doesn't,
@@ -94,9 +119,11 @@ kamailio starts anyway with a startup warning — fix DNS and restart the pod.
 
 ## Day-to-day operations
 
+Deploys are driven from GitHub: push to rebuild/redeploy, or update the
+site values with `gh secret set GLIA_VALUES_YAML < values-glia.yaml` and hit
+"Run workflow" on `deploy.yaml`. Inspect from the workstation with kubectl:
+
 ```sh
-helmfile diff
-helmfile apply
 kubectl -n sipmediagw get pods -o wide
 kubectl -n sipmediagw logs -l app.kubernetes.io/component=gateway --tail=100
 ```

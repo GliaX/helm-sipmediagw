@@ -1,0 +1,71 @@
+# CD: applies the chart to the glia DOKS cluster using the private site
+# values overlay, stored as the GLIA_VALUES_YAML repository secret.
+#
+# Runs automatically after every successful build-images run on main,
+# or on demand from the Actions page ("Run workflow").
+#
+# Repository secrets it reads:
+#   GLIA_VALUES_YAML            contents of the private values overlay
+#                               (update from the workstation:
+#                               gh secret set GLIA_VALUES_YAML < values-glia.yaml)
+#   SIP_SECRET, TURN_USER, TURN_PASS,
+#   MYSQL_ROOT_PASSWORD, POSTGRES_USER,
+#   POSTGRES_PASSWORD           fed to scripts/bootstrap-secrets.sh
+#   DIGITALOCEAN_ACCESS_TOKEN   DO API token, exchanged for a short-lived
+#                               kubeconfig at deploy time
+#   DOKS_CLUSTER_NAME           name of the DOKS cluster
+
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [build-images]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write site values overlay
+        env:
+          GLIA_VALUES_YAML: ${{ secrets.GLIA_VALUES_YAML }}
+        run: printf '%s\n' "$GLIA_VALUES_YAML" > values-glia.yaml
+
+      - name: Install helmfile
+        run: |
+          curl -fsSL -o /tmp/helmfile.tgz \
+            https://github.com/helmfile/helmfile/releases/download/v1.8.1/helmfile_1.8.1_linux_amd64.tar.gz
+          tar -xzf /tmp/helmfile.tgz -C /tmp helmfile
+          sudo install -m 0755 /tmp/helmfile /usr/local/bin/helmfile
+          helmfile version
+
+      - name: Fetch a short-lived kubeconfig
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          DOKS_CLUSTER_NAME: ${{ secrets.DOKS_CLUSTER_NAME }}
+        run: |
+          doctl auth init --access-token "$DIGITALOCEAN_ACCESS_TOKEN"
+          doctl kubernetes cluster kubeconfig save --expiry-seconds 1200 "$DOKS_CLUSTER_NAME"
+          kubectl get nodes
+
+      - name: Bootstrap k8s secrets
+        env:
+          SIP_SECRET: ${{ secrets.SIP_SECRET }}
+          TURN_USER: ${{ secrets.TURN_USER }}
+          TURN_PASS: ${{ secrets.TURN_PASS }}
+          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: ./scripts/bootstrap-secrets.sh
+
+      - name: helmfile apply
+        run: helmfile --state-values-file values-glia.yaml apply

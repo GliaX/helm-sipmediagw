@@ -5,13 +5,16 @@
 # Site-specific values (domains, node pools, ...) live OUTSIDE this repo.
 # Layer them on top of the chart defaults with:
 #   helmfile --state-values-file ../your-values.yaml apply
+#
+# .gotmpl extension: helmfile v1 evaluates Go templates ONLY in .gotmpl
+# files. The values entry below feeds the state values (--state-values-file)
+# through to the release; helmfile does not do that on its own. Keep this
+# file free of literal braces in comments - they would be evaluated.
 
 releases:
   - name: sipmediagw
     namespace: sipmediagw
     chart: ./chart
     createNamespace: true
-    # Pass state values through to the release (helmfile does not do this
-    # on its own: --state-values-file only feeds {{ .Values }} here).
     values:
       - {{ toYaml .Values | nindent 8 }}

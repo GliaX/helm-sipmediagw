@@ -39,6 +39,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            GW_VERSION=${{ env.UPSTREAM_REV }}
           tags: |
             ghcr.io/gliax/sipmediagw:${{ env.UPSTREAM_REV }}
             ghcr.io/gliax/sipmediagw:latest
