@@ -11,7 +11,13 @@ metadata:
     {{- toYaml .Values.kamailio.service.annotations | nindent 4 }}
 spec:
   type: {{ .Values.kamailio.service.type }}
+  {{- if and (eq .Values.kamailio.service.type "NodePort") .Values.kamailio.service.nodePort }}
+  # Cluster, not Local: the forwarding rule may target any cluster node, and
+  # kube-proxy relays to the kamailio pod wherever it lives.
+  externalTrafficPolicy: Cluster
+  {{- else }}
   externalTrafficPolicy: Local
+  {{- end }}
   selector:
     {{- include "sipmediagw.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: kamailio
@@ -20,4 +26,7 @@ spec:
       protocol: TCP
       port: {{ .Values.kamailio.service.port }}
       targetPort: 5060
+      {{- if and (eq .Values.kamailio.service.type "NodePort") .Values.kamailio.service.nodePort }}
+      nodePort: {{ .Values.kamailio.service.nodePort }}
+      {{- end }}
 {{- end }}

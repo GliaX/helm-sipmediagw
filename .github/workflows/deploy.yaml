@@ -9,8 +9,8 @@
 #                               (update from the workstation:
 #                               gh secret set GLIA_VALUES_YAML < values-glia.yaml)
 #   SIP_SECRET, TURN_USER, TURN_PASS,
-#   MYSQL_ROOT_PASSWORD, POSTGRES_USER,
-#   POSTGRES_PASSWORD           fed to scripts/bootstrap-secrets.sh
+#   MYSQL_HOST, MYSQL_ROOT_PASSWORD
+#                               fed to scripts/bootstrap-secrets.sh
 #   DIGITALOCEAN_ACCESS_TOKEN   DO API token, exchanged for a short-lived
 #                               kubeconfig at deploy time
 #   DOKS_CLUSTER_NAME           name of the DOKS cluster
@@ -62,9 +62,8 @@ jobs:
           SIP_SECRET: ${{ secrets.SIP_SECRET }}
           TURN_USER: ${{ secrets.TURN_USER }}
           TURN_PASS: ${{ secrets.TURN_PASS }}
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
           MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
-          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: ./scripts/bootstrap-secrets.sh
 
       - name: helmfile apply

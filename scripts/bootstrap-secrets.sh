@@ -5,10 +5,10 @@
 #
 #   SIP_SECRET          shared gateway/kamailio SIP registration password
 #   TURN_USER, TURN_PASS credentials for the coturn at turn.example.org
-#   MYSQL_ROOT_PASSWORD                   kamailio DB root password
+#   MYSQL_HOST                            external MySQL host (plain 3306)
+#   MYSQL_ROOT_PASSWORD                   that instance's admin password
 #                                         (the kamailio user is created by
 #                                         kamailioRun.py, as upstream)
-#   POSTGRES_USER, POSTGRES_PASSWORD      homer DB credentials
 #
 # Usage:
 #   set -a; . ../secrets.env; set +a   # file lives one level above the repo
@@ -29,9 +29,8 @@ require() {
 require SIP_SECRET
 require TURN_USER
 require TURN_PASS
+require MYSQL_HOST
 require MYSQL_ROOT_PASSWORD
-require POSTGRES_USER
-require POSTGRES_PASSWORD
 
 kubectl create namespace "$NS" 2>/dev/null || true
 
@@ -46,12 +45,8 @@ kubectl -n "$NS" create secret generic sipmediagw-turn-secret \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl -n "$NS" create secret generic sipmediagw-mysql-secret \
+  --from-literal=MYSQL_HOST="$MYSQL_HOST" \
   --from-literal=MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl -n "$NS" create secret generic sipmediagw-postgres-secret \
-  --from-literal=POSTGRES_USER="$POSTGRES_USER" \
-  --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 echo "Secrets applied in namespace $NS."

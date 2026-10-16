@@ -52,7 +52,10 @@ spec:
               value: {{ printf "%s-heplify.%s.svc.cluster.local" $fullname .Release.Namespace | quote }}
             {{- end }}
             - name: MYSQL_HOST
-              value: {{ printf "%s-mysql" $fullname | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $kam.database.existingSecret }}
+                  key: MYSQL_HOST
             - name: SIP_SECRET
               valueFrom:
                 secretKeyRef:
@@ -65,7 +68,7 @@ spec:
                   key: GW_NAME_PREFIX
           envFrom:
             - secretRef:
-                name: {{ $kam.mysql.existingSecret }}
+                name: {{ $kam.database.existingSecret }}
           ports:
             - name: sip-udp
               containerPort: 5060

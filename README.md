@@ -14,12 +14,12 @@ GitHub Actions secrets and Kubernetes Secrets referenced by the chart via
 | Component        | Choice                                                                  |
 | ---------------- | ----------------------------------------------------------------------- |
 | Gateway images   | Built **as-is** from upstream rev `cc280366` (no overlay). Workflow: `.github/workflows/build-images.yaml` → `ghcr.io/gliax/sipmediagw`, `ghcr.io/gliax/kamailio4sipmediagw` |
-| Kamailio + MySQL | In-cluster; SIP registration + gateway dispatch. Upstream config/scripts on the official kamailio **6.0.8** image (Debian trixie) — upstream's own base (5.6.3-bullseye) is unbuildable since bullseye EOL; sole config delta: `dlg_flag` modparam dropped (removed in kamailio 6) |
-| Public SIP entry | Dedicated LoadBalancer (TCP 5060) — `sip.example.org` points at its IP |
+| Kamailio + MySQL | SIP registration + gateway dispatch; DB is the **existing external MySQL** (host + admin password via the `sipmediagw-mysql-secret` Secret). Upstream config/scripts on the official kamailio **6.0.8** image (Debian trixie) — upstream's own base (5.6.3-bullseye) is unbuildable since bullseye EOL; sole config delta: `dlg_flag` modparam dropped (removed in kamailio 6) |
+| Public SIP entry | NodePort 30060 on the nodes — an existing external LB forwards TCP 5060 there; `sip.example.org` points at that LB |
 | Gateways         | Static StatefulSet replicas (no HTTPLauncher / proxyAPI / pairing)       |
 | Media (RTP)      | Outbound via existing coturn `turn.example.org:3478` (Nextcloud Talk TURN) — no inbound RTP ports needed |
 | Homer            | In-cluster: timescaledb + heplify-server + webapp (SIP capture, optional) |
-| Node placement   | `doks.digitalocean.com/node-pool: gateway-nodes`; a privileged DaemonSet loads `snd-aloop` + `v4l2loopback` on those nodes |
+| Node placement   | `doks.digitalocean.com/node-pool: gateway-nodes`; a privileged DaemonSet loads `snd-aloop` (audio) + `v4l2loopback` (video only — skipped when `audioOnly: "true"`) |
 | Renater entry point | Upstream `deploy/docker-compose.yml` + `.env` — chart variables mirror the upstream env names (secret-sourced keys excepted) |
 
 ## Repo layout
@@ -35,9 +35,8 @@ GitHub Actions secrets and Kubernetes Secrets referenced by the chart via
 │       ├── gateway-configmap.yaml    # Gateway env (upstream .env equivalents; secrets come from Secrets)
 │       ├── gateway-statefulset.yaml  # Static gateways; per-ordinal /dev/videoN via subPathExpr
 │       ├── modules-daemonset.yaml    # Loads snd-aloop/v4l2loopback on pool nodes (8 video + 16 audio devices)
-│       ├── kamailio-deployment.yaml
-│       ├── kamailio-service.yaml     # LoadBalancer, TCP 5060
-│       ├── mysql-statefulset.yaml
+│       ├── kamailio-deployment.yaml  # DB: existing external MySQL via Secret
+│       ├── kamailio-service.yaml     # NodePort 30060, TCP 5060
 │       └── homer.yaml                # timescale + heplify-server + webapp
 ├── scripts/
 │   └── bootstrap-secrets.sh          # Creates the 4 Secrets from env vars
@@ -56,6 +55,15 @@ GitHub Actions secrets and Kubernetes Secrets referenced by the chart via
   (stock Ubuntu node images have it)
 - GHCR packages `ghcr.io/gliax/sipmediagw` and `ghcr.io/gliax/kamailio4sipmediagw`
   (public, or set `global.imagePullSecrets` if kept private)
+- External MySQL reachable from the cluster **on plain 3306** — the kamailio
+  chain carries no port option. Two setups:
+  - admin-grade credentials (root or equivalent): first boot auto-provisions —
+    strips `ONLY_FULL_GROUP_BY` via `SET PERSIST` (**server-global** on a shared
+    instance), creates user `kamailio@'%'` (password `kamailiorw`, baked into
+    the upstream image), `GRANT ALL ON *.*`, then builds the schema.
+  - shared instance (preferred): pre-create the `kamailio` database and a
+    limited user yourself — the admin attempts fail harmlessly at startup and
+    kamailio runs against the ready schema.
 
 ## CI / CD
 
@@ -85,7 +93,8 @@ change for CI; CD also chains off CI):
 | `GLIA_VALUES_YAML` | full text of the private site values overlay |
 | `SIP_SECRET` | shared gateway/kamailio SIP registration password |
 | `TURN_USER` / `TURN_PASS` | coturn credentials at `turn.example.org` |
-| `MYSQL_ROOT_PASSWORD` | kamailio DB root password |
+| `MYSQL_HOST` | external MySQL host (plain 3306) |
+| `MYSQL_ROOT_PASSWORD` | that instance's admin password |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` | homer DB credentials |
 | `DIGITALOCEAN_ACCESS_TOKEN` | DO API token (kubeconfig exchange only) |
 | `DOKS_CLUSTER_NAME` | DOKS cluster name |
@@ -128,19 +137,12 @@ kubectl -n sipmediagw get pods -o wide
 kubectl -n sipmediagw logs -l app.kubernetes.io/component=gateway --tail=100
 ```
 
-### Kamailio DB backup
+### Kamailio DB
 
-The mysql PVC (`sipmediagw-mysql`) holds the single source of registration
-state (SIP accounts, location table). Recovery = fresh PVC + restore:
-
-```sh
-kubectl -n sipmediagw exec sipmediagw-mysql-0 -- \
-  sh -c 'mysqldump -p"$MYSQL_ROOT_PASSWORD" kamailio' > kamailio-backup.sql
-```
-
-Restore on a new volume:
-`kubectl exec -i sipmediagw-mysql-0 -- sh -c 'mysql -p"$MYSQL_ROOT_PASSWORD" kamailio' < kamailio-backup.sql`,
-then restart kamailio. The gateway pods re-register on their own.
+The external MySQL instance holds the single source of registration state
+(SIP accounts, location table) — it lives and is backed up outside this repo.
+Recovery = ensure the database exists on the instance, then restart kamailio:
+first boot re-registers the gateways on its own.
 
 Gateway SIP accounts register as `<GW_NAME_PREFIX>.<pod-index>` (default
 `mediagw.0`, `mediagw.1`, …) against the in-cluster kamailio; kamailio routes
@@ -148,12 +150,18 @@ inbound PSTN INVITEs to an unlocked gateway with the upstream dispatch logic.
 
 ### Scaling gateways (concurrent calls)
 
-One gateway pod = one call bridge (4 CPU / 4Gi requested). Gateways co-locate
-up to node resources — an 8-vCPU node fits 2, a 16-vCPU node fits 4 — with a
-soft anti-affinity spreading them across the pool. Each pod ordinal `N` binds
-the node's `/dev/videoN` as its `/dev/video0` and ALSA cards `2N`/`2N+1`, so
-every node (via the modules DaemonSet) provisions 8 video devices + 16
-loopback cards: **up to 8 gateways per node, `replicaCount` capped at 8**
+One gateway pod = one call bridge (~750m CPU / 1.5Gi requested; measured
+footprint ≈0.3 vCPU busy — baresip audio + headless Chromium, see upstream
+`docs/CPU_consumption.md`). Gateways co-locate with everything else on shared
+nodes — a soft anti-affinity spreads them across the pool.
+
+Audio-only (the chart default) needs no video devices: pods mount only
+`/dev/snd` (16 loopback cards per node via the DaemonSet), so density is
+limited only by node resources. With `audioOnly: "false"` each pod ordinal `N`
+additionally binds
+the node's `/dev/videoN` as its `/dev/video0`, so
+every node provisions 8 video devices: **up to 8 gateways per node,
+`replicaCount` capped at 8**
 (enforced at `helmfile template`/`apply` time). Ordinals are unique per
 cluster, so two pods can never claim the same device regardless of placement.
 

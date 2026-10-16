@@ -26,19 +26,22 @@ gateway:
     doks.digitalocean.com/node-pool: gateway-nodes
   tolerations: []
   affinity: {}
-  # Density: gateways co-locate up to node resources (4 CPU / 4Gi per gateway),
-  # spread across nodes by a soft anti-affinity. Ordinals 0..7 bind host
+  # Density: audio-only sizing, measured against upstream CPU_consumption.md
+  # (~0.3 vCPU/gw busy: baresip audio + headless Chromium; no Xvfb, no video
+  # pipeline). Gateways co-locate on shared nodes, spread by a soft
+  # anti-affinity. Ordinals 0..7 bind host
   # /dev/video0../dev/video7, so `replicaCount` must stay <= deviceCeiling
   # (what the modules DaemonSet provisions per node). Enforced at template time.
   deviceCeiling: 8
   resources:
     requests:
-      cpu: "4"
-      memory: 4Gi
+      cpu: "750m"
+      memory: 1.5Gi
     limits:
-      memory: 6Gi
-  # docker-compose: shm_size: '2gb' (Chromium needs it)
-  shmSize: 2Gi
+      memory: 2.5Gi
+  # docker-compose: shm_size: '2gb' (Chromium needs it). Wired as a tmpfs
+  # /dev/shm in the statefulset; audio-only Chromium needs far less than video.
+  shmSize: 256Mi
   updateStrategy:
     type: RollingUpdate
   terminationGracePeriodSeconds: 30
@@ -46,11 +49,15 @@ gateway:
   # Gateway runtime configuration (upstream .env equivalents).
   config:
     mainApp: baresip
-    cpuPerGw: "4"
+    # SIPMediaGW.sh caps internal instances at nproc / CPU_PER_GW; one gateway
+    # pod runs one bridge, so this only bounds self-sizing logic.
+    cpuPerGw: "2"
     timeZone: America/Toronto
     # BROWSING: nextcloud
     browsing: nextcloud
-    audioOnly: "false"
+    # true = no Xvfb/video pipeline; headless Chromium; skips v4l2loopback and
+    # /dev/videoN plumbing (init-wait, mounts, DaemonSet module) automatically.
+    audioOnly: "true"
     withAlsa: "true"
     displays:
       web: ":99"
@@ -135,37 +142,37 @@ kamailio:
     limits:
       memory: 512Mi
   service:
-    type: LoadBalancer
-    annotations:
-      service.beta.kubernetes.io/do-loadbalancer-name: sipmediagw-sip
-      service.beta.kubernetes.io/do-loadbalancer-protocol: tcp
-    # TCP only: DO load balancers cannot mix TCP+UDP on one Service, and the
-    # trunk flow is sipProtocol: tcp. In-cluster UDP still works pod-to-pod.
+    # NodePort, not LoadBalancer: SIP signaling rides an existing load
+    # balancer via a TCP forwarding rule to <node-ip>:nodePort, and RTP never
+    # touches the cluster (carrier media relays through the external coturn).
+    type: NodePort
+    # Pin the port so the external forwarding rule has a stable target.
+    nodePort: 30060
+    annotations: {}
     port: 5060
-  mysql:
-    image:
-      repository: mysql
-      tag: "8.4"
-      pullPolicy: IfNotPresent
-    existingSecret: sipmediagw-mysql-secret   # key: MYSQL_ROOT_PASSWORD
-    database: kamailio
-    user: kamailio
-    storage:
-      size: 5Gi
-      storageClass: ""
-    resources:
-      requests:
-        cpu: 250m
-        memory: 512Mi
-      limits:
-        memory: 1Gi
+  # External MySQL (existing instance; the bundled MySQL 8.4 pod was dropped).
+  # Host + admin password come from the secret (keys: MYSQL_HOST,
+  # MYSQL_ROOT_PASSWORD). The chain carries no port field: the instance must
+  # be reachable on plain 3306.
+  # First boot auto-provisions when the credentials are admin-grade:
+  # SET PERSIST strips ONLY_FULL_GROUP_BY (SERVER-GLOBAL on the instance),
+  # creates user 'kamailio'@'%' IDENTIFIED BY 'kamailiorw' (password baked
+  # into the upstream image), GRANTs ALL ON *.*, then kamdbctl create builds
+  # the schema. On a shared instance prefer pre-creating the database and the
+  # limited user yourself — the admin attempts then fail harmlessly at
+  # startup and kamailio runs against the ready schema.
+  database:
+    existingSecret: sipmediagw-mysql-secret
   existingSecrets:
     # SIP registration credential shared with the gateways.
     # Keys: SIP_SECRET, GW_NAME_PREFIX
     cred: sipmediagw-sip-secret
 
+# SIP capture: heplify-server + TimescaleDB (10Gi PVC) + webapp UI. Off by
+# default — kamailio pod logs and the carrier's own call logs cover a
+# 2-call trunk. Re-enable here when per-call ladder diagrams are needed.
 homer:
-  enabled: true
+  enabled: false
   heplifyServer:
     image:
       repository: sipcapture/heplify-server

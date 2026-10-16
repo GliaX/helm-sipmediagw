@@ -4,6 +4,7 @@
 {{- fail (printf "gateway.replicaCount (%d) exceeds gateway.deviceCeiling (%d): nodes only have /dev/video0../dev/video%d" (int $gw.replicaCount) (int $gw.deviceCeiling) (int (sub $gw.deviceCeiling 1))) }}
 {{- end }}
 {{- $gwConfig := $gw.config -}}
+{{- $audioOnly := eq ($gwConfig.audioOnly | toString) "true" -}}
 {{- $kamHost := printf "%s-kamailio.%s.svc.cluster.local" $fullname .Release.Namespace -}}
 apiVersion: v1
 kind: Service
@@ -55,7 +56,7 @@ spec:
         {{- toYaml $gw.nodeSelector | nindent 8 }}
       {{- with $gw.tolerations }}
       tolerations:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml $gw.tolerations | nindent 8 }}
       {{- end }}
       affinity:
         podAntiAffinity:
@@ -85,6 +86,10 @@ spec:
             - /bin/bash
             - -c
             - |
+              {{- if $audioOnly }}
+              echo "audio-only: no video devices needed"
+              exit 0
+              {{- else }}
               DEV="/dev-host/video${GW_ID}"
               for i in $(seq 1 150); do
                 [ -e "$DEV" ] && echo "$DEV present" && exit 0
@@ -92,14 +97,17 @@ spec:
               done
               echo "timeout waiting for $DEV — is the modules DaemonSet up on this node?" >&2
               exit 1
+              {{- end }}
           env:
             - name: GW_ID
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+          {{- if not $audioOnly }}
           volumeMounts:
             - name: dev-video
               mountPath: /dev-host
+          {{- end }}
       containers:
         - name: gateway
           image: "{{ $gw.image.repository }}:{{ $gw.image.tag | default .Values.upstream.rev }}"
@@ -158,11 +166,15 @@ spec:
             - configMapRef:
                 name: {{ $fullname }}-gateway
           volumeMounts:
+            {{- if not $audioOnly }}
             - name: dev-video
               mountPath: /dev/video0
               subPathExpr: video$(GW_ID)
+            {{- end }}
             - name: dev-snd
               mountPath: /dev/snd
+            - name: shm
+              mountPath: /dev/shm
             - name: logs
               mountPath: /var/logs
           livenessProbe:
@@ -176,13 +188,19 @@ spec:
           resources:
             {{- toYaml $gw.resources | nindent 12 }}
       volumes:
+        {{- if not $audioOnly }}
         - name: dev-video
           hostPath:
             path: /dev
             type: Directory
+        {{- end }}
         - name: dev-snd
           hostPath:
             path: /dev/snd
             type: Directory
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $gw.shmSize }}
         - name: logs
           emptyDir: {}
