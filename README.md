@@ -1,8 +1,9 @@
 # SIPMediaGW on Kubernetes
 
 Helmfile-based deployment of [Renater/SIPMediaGW](https://github.com/Renater/SIPMediaGW)
-for a Kubernetes cluster: SIP room devices dial in over PSTN (Twilio) and bridge
-into Nextcloud Talk rooms.
+for a Kubernetes cluster: PSTN callers dial in over a Twilio trunk (1-800 /
+mobile) and bridge into Nextcloud Talk rooms. Audio-only; sized for a
+2-concurrent-call trunk co-located on an existing cluster.
 
 This repo holds only non-secret configuration plus two workflows: one builds
 the images, one deploys the stack to the cluster. All credentials live in
@@ -16,9 +17,10 @@ GitHub Actions secrets and Kubernetes Secrets referenced by the chart via
 | Gateway images   | Built **as-is** from upstream rev `cc280366` (no overlay). Workflow: `.github/workflows/build-images.yaml` → `ghcr.io/gliax/sipmediagw`, `ghcr.io/gliax/kamailio4sipmediagw` |
 | Kamailio + MySQL | SIP registration + gateway dispatch; DB is the **existing external MySQL** (host + admin password via the `sipmediagw-mysql-secret` Secret). Upstream config/scripts on the official kamailio **6.0.8** image (Debian trixie) — upstream's own base (5.6.3-bullseye) is unbuildable since bullseye EOL; sole config delta: `dlg_flag` modparam dropped (removed in kamailio 6) |
 | Public SIP entry | NodePort 30060 on the nodes — an existing external LB forwards TCP 5060 there; `sip.example.org` points at that LB |
-| Gateways         | Static StatefulSet replicas (no HTTPLauncher / proxyAPI / pairing)       |
+| Gateways         | Static StatefulSet replicas, audio-only (headless Chromium, no Xvfb/video pipeline; ~0.3 vCPU busy each). No HTTPLauncher / proxyAPI / pairing |
+| Footprint        | ~1.75 vCPU / 3.3Gi requested chart-wide (2 gateways + kamailio + modules DaemonSet); zero PVCs |
 | Media (RTP)      | Outbound via existing coturn `turn.example.org:3478` (Nextcloud Talk TURN) — no inbound RTP ports needed |
-| Homer            | In-cluster: timescaledb + heplify-server + webapp (SIP capture, optional) |
+| Homer            | Optional SIP capture (heplify-server + TimescaleDB + webapp UI) — **disabled by default**; enable with `homer.enabled: true` when per-call ladder diagrams are needed |
 | Node placement   | `doks.digitalocean.com/node-pool: gateway-nodes`; a privileged DaemonSet loads `snd-aloop` (audio) + `v4l2loopback` (video only — skipped when `audioOnly: "true"`) |
 | Renater entry point | Upstream `deploy/docker-compose.yml` + `.env` — chart variables mirror the upstream env names (secret-sourced keys excepted) |
 
@@ -33,13 +35,13 @@ GitHub Actions secrets and Kubernetes Secrets referenced by the chart via
 │   ├── values.yaml
 │   └── templates/
 │       ├── gateway-configmap.yaml    # Gateway env (upstream .env equivalents; secrets come from Secrets)
-│       ├── gateway-statefulset.yaml  # Static gateways; per-ordinal /dev/videoN via subPathExpr
-│       ├── modules-daemonset.yaml    # Loads snd-aloop/v4l2loopback on pool nodes (8 video + 16 audio devices)
+│       ├── gateway-statefulset.yaml  # Static gateways; /dev/snd always, /dev/videoN only when video enabled
+│       ├── modules-daemonset.yaml    # Loads snd-aloop on pool nodes (+v4l2loopback only when video enabled)
 │       ├── kamailio-deployment.yaml  # DB: existing external MySQL via Secret
 │       ├── kamailio-service.yaml     # NodePort 30060, TCP 5060
-│       └── homer.yaml                # timescale + heplify-server + webapp
+│       └── homer.yaml                # Optional SIP capture (off by default)
 ├── scripts/
-│   └── bootstrap-secrets.sh          # Creates the 4 Secrets from env vars
+│   └── bootstrap-secrets.sh          # Creates the 3 Secrets from env vars
 ├── .github/workflows/
 │   ├── build-images.yaml             # CI: builds + pushes both images to GHCR
 │   └── deploy.yaml                   # CD: bootstrap Secrets + helmfile apply
@@ -81,7 +83,7 @@ change for CI; CD also chains off CI):
 - **`deploy.yaml`** (CD) — after every successful build, and on demand via
   its "Run workflow" button: writes the site values overlay from the
   `GLIA_VALUES_YAML` secret, fetches a short-lived DOKS kubeconfig with
-  `doctl`, recreates the 4 k8s Secrets via `bootstrap-secrets.sh`, and runs
+  `doctl`, recreates the 3 k8s Secrets via `bootstrap-secrets.sh`, and runs
   `helmfile apply`. Site values therefore never live in any repo — update
   them from the workstation with
   `gh secret set GLIA_VALUES_YAML < values-glia.yaml`.
@@ -95,7 +97,6 @@ change for CI; CD also chains off CI):
 | `TURN_USER` / `TURN_PASS` | coturn credentials at `turn.example.org` |
 | `MYSQL_HOST` | external MySQL host (plain 3306) |
 | `MYSQL_ROOT_PASSWORD` | that instance's admin password |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` | homer DB credentials |
 | `DIGITALOCEAN_ACCESS_TOKEN` | DO API token (kubeconfig exchange only) |
 | `DOKS_CLUSTER_NAME` | DOKS cluster name |
 
@@ -104,19 +105,22 @@ change for CI; CD also chains off CI):
 ```sh
 # 1. Push the repo: build-images runs, then deploy fires automatically
 #    (DIGITALOCEAN_ACCESS_TOKEN must be set for the deploy job to reach the
-#    cluster; the six credential secrets feed bootstrap-secrets.sh)
+#    cluster; the five credential secrets feed bootstrap-secrets.sh)
 
-# 2. One-time DNS: after the first apply, create the A record for
-#    sip.example.org (see below), then re-run the deploy workflow
+# 2. One-time: forwarding rule + DNS (see below), then re-run the deploy
+#    workflow
 ```
 
-### Public SIP entry (one-time DNS setup)
+### Public SIP entry (one-time setup)
 
 kamailio advertises a DNS name — never a raw IP — in Via/Record-Route
 headers, so an LB IP change only ever touches the A record.
 
-- Get the LB external IP: `kubectl -n sipmediagw get svc sipmediagw-kamailio`
-- Create DNS A record: `sip.example.org` → that IP.
+- On the existing external LB: add a TCP forwarding rule
+  `5060 → <node IPs>:30060` with a TCP health check on 30060 (the kamailio
+  Service is NodePort 30060; `externalTrafficPolicy: Cluster` accepts
+  traffic on any node).
+- Create DNS A record: `sip.example.org` → that LB IP.
 - Set `kamailio.publicAddress` to that DNS name in the site values overlay
   (the `GLIA_VALUES_YAML` Actions secret — update it from the workstation:
   `gh secret set GLIA_VALUES_YAML < values-glia.yaml`), then re-run the
@@ -178,6 +182,11 @@ reboot or manual modprobe to pick up more devices).
   instead. Revisit if ad-hoc meeting pairing is ever needed.
 - **scaler**: Outscale VM autoscaler — meaningless on Kubernetes.
 - **coturn**: replaced by the existing `turn.example.org` TURN.
+- **bundled MySQL**: replaced by the existing external MySQL instance
+  (`MYSQL_HOST`/`MYSQL_ROOT_PASSWORD` secrets → `sipmediagw-mysql-secret`).
+- **Homer**: disabled by default (`homer.enabled: false`) — kamailio pod logs
+  and the carrier's call logs cover a 2-call trunk. Re-enable for per-call
+  ladder diagrams; its own Postgres ships in the chart when enabled.
 - **TLS for SIP** (`TLS=True` upstream): kamailio would need certs + port 5061
   on the LB; upstream default in the VM setup was effectively disabled. Revisit
   if the SIP trunk requires it.
